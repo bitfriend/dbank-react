@@ -1,38 +1,21 @@
 .App {
-  text-align: center;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+.App .ant-tabs-top > .ant-tabs-nav {
+  margin: unset;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
+.App .ant-tabs-card .ant-tabs-tab {
+  background-color: transparent;
+  border-color: transparent;
 }
 
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
+.App .ant-tabs-card .ant-tabs-tab-active {
+  background-color: white;
+  border-color: white;
 }
 
-.App-link {
-  color: #61dafb;
-}
-
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.App .ant-tabs-card .ant-tabs-content {
+  background-color: white;
+  padding: 24px;
 }
