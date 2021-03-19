@@ -5,7 +5,7 @@ import './App.css';
 
 import Web3 from 'web3';
 import Token from './contracts/Token.json';
-import dBank from './contracts/dBank.json';
+import Dbank from './contracts/Dbank.json';
 
 const { Header, Content } = Layout;
 const { Paragraph, Title } = Typography;
@@ -46,8 +46,8 @@ class App extends PureComponent {
 
       // load contracts
       const token = new web3.eth.Contract(Token.abi, Token.networks[netId].address);
-      const dbank = new web3.eth.Contract(dBank.abi, dBank.networks[netId].address);
-      const dBankAddress = dBank.networks[netId].address;
+      const dbank = new web3.eth.Contract(Dbank.abi, Dbank.networks[netId].address);
+      const dBankAddress = Dbank.networks[netId].address;
 
       this.setState({
         loading: false,
