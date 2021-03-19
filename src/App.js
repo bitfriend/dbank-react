@@ -1,5 +1,5 @@
 import React, { PureComponent } from 'react';
-import { Button, InputNumber, Layout, Tabs, Typography } from 'antd';
+import { Button, InputNumber, Layout, Spin, Tabs, Typography } from 'antd';
 import 'antd/dist/antd.css';
 import './App.css';
 
@@ -48,7 +48,13 @@ class App extends PureComponent {
       const token = new web3.eth.Contract(Token.abi, Token.networks[netId].address);
       const dbank = new web3.eth.Contract(dBank.abi, dBank.networks[netId].address);
       const dBankAddress = dBank.networks[netId].address;
-      this.setState({ token, dbank, dBankAddress });
+
+      this.setState({
+        loading: false,
+        token,
+        dbank,
+        dBankAddress
+      });
     } catch (error) {
       this.setState({ loading: false }, () => {
         console.log(error);
@@ -262,6 +268,21 @@ class App extends PureComponent {
           </div>
         </Content>
       </Layout>
+      {this.state.loading && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          backgroundColor: 'rgba(255, 255, 255, 0.8)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center'
+        }}>
+          <Spin />
+        </div>
+      )}
     </div>
   )
 }
