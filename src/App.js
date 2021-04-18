@@ -1,11 +1,12 @@
 import React, { PureComponent } from 'react';
-import { Button, InputNumber, Layout, Spin, Tabs, Typography } from 'antd';
+import { Alert, Button, InputNumber, Layout, Spin, Tabs, Typography } from 'antd';
 import 'antd/dist/antd.css';
 import './App.css';
 
 import Web3 from 'web3';
-import Token from './contracts/Token.json';
-import Dbank from './contracts/Dbank.json';
+import Token from './abis/Token.json';
+import Dbank from './abis/Dbank.json';
+import networks from './truffle-networks';
 
 const { Header, Content } = Layout;
 const { Paragraph, Title } = Typography;
@@ -13,47 +14,76 @@ const { TabPane } = Tabs;
 
 class App extends PureComponent {
   state = {
-    web3: null,
     account: '0x0',
-    balance: '0',
-    token: null,
-    dbank: null,
-    dBankAddress: null,
-    depositAmount: null,
-    borrowAmount: null,
-    loading: false
+    walletBalance: '0',
+    depositBalance: '0',
+    depositAmount: '0.01',
+    deposited: false,
+    borrowBalance: '0',
+    borrowAmount: '0.01',
+    borrowed: false,
+    loading: false,
+    hasError: false,
+    errorMessage: '',
+    errorDescription: ''
   }
 
-  componentDidMount = async () => {
+  async componentDidMount() {
     this.setState({ loading: true });
     try {
       // Get network provider and web3 instance.
-      const web3 = await this.getWeb3();
-      const netId = await web3.eth.net.getId();
-      const accounts = await web3.eth.getAccounts();
+      this.web3 = await this.getWeb3();
 
-      // load balance
+      // Use web3 to get the user's accounts.
+      const accounts = await this.web3.eth.getAccounts();
+
+      // Get the contract instance.
+      const envNetworkType = process.env.REACT_APP_NETWORK_TYPE;
+      const networkType = await this.web3.eth.net.getNetworkType();
+      if (networkType !== envNetworkType) {
+        if (!(envNetworkType === 'development' && networkType === 'private')) {
+          this.setState({
+            loading: false,
+            hasError: true,
+            errorMessage: 'Error in Ethereum Network Type',
+            errorDescription: `Current account is of ${networkType} network. Please select account for ${process.env.REACT_APP_NETWORK_TYPE} network.`
+          });
+          return;
+        }
+      }
+      const networkId = await this.web3.eth.net.getId();
+
+      // load wallet balance
       if (typeof accounts[0] !== 'undefined') {
-        const balance = await web3.eth.getBalance(accounts[0]);
+        const walletBalance = await this.web3.eth.getBalance(accounts[0]);
         this.setState({
-          web3,
           account: accounts[0],
-          balance: web3.utils.fromWei(balance)
+          walletBalance
         });
       } else {
         window.alert('Please login with MetaMask');
       }
 
       // load contracts
-      const token = new web3.eth.Contract(Token.abi, Token.networks[netId].address);
-      const dbank = new web3.eth.Contract(Dbank.abi, Dbank.networks[netId].address);
-      const dBankAddress = Dbank.networks[netId].address;
+      this.tokenContract = new this.web3.eth.Contract(Token.abi, Token.networks[networkId].address);
+      this.dbankContract = new this.web3.eth.Contract(Dbank.abi, Dbank.networks[networkId].address);
+
+      // Install event watch
+      this.recentBlock = await this.web3.eth.getBlockNumber();
+      this.watchEvents();
+
+      this.dBankAddress = Dbank.networks[networkId].address;
+      const depositBalance = await this.dbankContract.methods.etherBalanceOf(accounts[0]).call();
+      const deposited = await this.dbankContract.methods.isDeposited(accounts[0]).call();
+      const borrowBalance = await this.dbankContract.methods.collateralEther(accounts[0]).call();
+      const borrowed = await this.dbankContract.methods.isBorrowed(accounts[0]).call();
 
       this.setState({
         loading: false,
-        token,
-        dbank,
-        dBankAddress
+        depositBalance,
+        deposited,
+        borrowBalance,
+        borrowed
       });
     } catch (error) {
       this.setState({ loading: false }, () => {
@@ -87,97 +117,294 @@ class App extends PureComponent {
       }
       // Fallback to localhost; use dev console port by default...
       else {
-        const provider = new Web3.providers.HttpProvider('http://127.0.0.1:7545');
-        const web3 = new Web3(provider);
+        const web3 = new Web3(this.getProvider());
         console.log('No web3 instance injected, using Local web3.');
         resolve(web3);
       }
     });
   })
 
-  deposit = async (amount) => {
-    if (typeof this.state.dbank !== 'undefined') {
-      try {
-        await this.state.dbank.methods.deposit().send({
-          value: this.state.web3.utils.toWei(amount.toPrecision()),
-          from: this.state.account
-        });
-      } catch (error) {
-        console.log('Error, deposit: ', error);
-      }
+  getProvider() {
+    if (process.env.REACT_APP_NETWORK_TYPE === 'development') {
+      return new Web3.providers.HttpProvider(`http://${networks.development.host}:${networks.development.port}`);
     }
+    return networks[process.env.REACT_APP_NETWORK_TYPE].provider();
   }
 
-  withdraw = async () => {
-    if (typeof this.state.dbank !== 'undefined') {
-      try {
-        await this.state.dbank.methods.withdraw().send({
-          from: this.state.account
-        });
-      } catch (error) {
-        console.log('Error, withdraw: ', error);
+  watchEvents() {
+    this.dbankContract.events.Deposit({}, (error, event) => {
+      // Network operation ends here
+      console.log('Deposit event', event);
+      if (event.blockNumber <= this.recentBlock) {
+        return;
       }
-    }
+      if (event.returnValues[0] !== this.state.account) {
+        return;
+      }
+      if (!error) {
+        let { walletBalance } = this.state;
+        walletBalance = this.web3.utils.toBN(walletBalance).sub(this.web3.utils.toBN(event.returnValues[1])).toString();
+        this.setState({
+          walletBalance,
+          depositBalance: event.returnValues[1],
+          depositAmount: null,
+          deposited: true,
+          loading: false
+        });
+      } else {
+        this.setState({ loading: false });
+      }
+    }).on('data', event => {
+      console.log('Deposit event data', event);
+    }).on('error', console.error);
+
+    this.dbankContract.events.Withdraw({}, (error, event) => {
+      // Network operation ends here
+      console.log('Withdraw event', event);
+      if (event.blockNumber <= this.recentBlock) {
+        return;
+      }
+      if (event.returnValues[0] !== this.state.account) {
+        return;
+      }
+      if (!error) {
+        let { walletBalance } = this.state;
+        const userBalance = event.returnValues[1];
+        const depositTime = event.returnValues[2];
+        const interest = event.returnValues[3];
+        walletBalance = this.web3.utils.toBN(walletBalance).add(this.web3.utils.toBN(userBalance)).toString();
+        this.setState({
+          walletBalance,
+          depositBalance: '0',
+          deposited: false,
+          loading: false
+        });
+      } else {
+        this.setState({ loading: false });
+      }
+    }).on('data', event => {
+      console.log('Withdraw event data', event);
+    }).on('error', console.error);
+
+    this.dbankContract.events.Borrow({}, (error, event) => {
+      // Network operation ends here
+      console.log('Borrow event', event);
+      if (event.blockNumber <= this.recentBlock) {
+        return;
+      }
+      if (event.returnValues[0] !== this.state.account) {
+        return;
+      }
+      const collateralBalance = event.returnValues[1];
+      const tokensToMint = event.returnValues[2];
+      if (!error) {
+        this.setState({
+          borrowBalance: collateralBalance,
+          borrowAmount: null,
+          borrowed: true,
+          loading: false
+        });
+      } else {
+        this.setState({ loading: false });
+      }
+    }).on('data', event => {
+      console.log('Borrow event data', event);
+    }).on('error', console.error);
+
+    this.tokenContract.events.Approval({}, (error, event) => {
+      // Network operation ends here
+      console.log('Approval event', event);
+      if (event.blockNumber <= this.recentBlock) {
+        return;
+      }
+      if (event.returnValues[0] !== this.state.account) {
+        return;
+      }
+      if (!error) {
+        const spender = event.returnValues[1];
+        const amount = event.returnValues[2];
+        this.setState({ loading: false });
+      } else {
+        this.setState({ loading: false });
+      }
+    }).on('data', event => {
+      console.log('Approval event data', event);
+    }).on('error', console.error);
+
+    this.dbankContract.events.PayOff({}, (error, event) => {
+      // Network operation ends here
+      console.log('PayOff event', event);
+      if (event.blockNumber <= this.recentBlock) {
+        return;
+      }
+      if (event.returnValues[0] !== this.state.account) {
+        return;
+      }
+      if (!error) {
+        const fee = event.returnValues[1];
+        this.setState({
+          borrowBalance: '0',
+          borrowed: false,
+          loading: false
+        });
+      } else {
+        this.setState({ loading: false });
+      }
+    }).on('data', event => {
+      console.log('PayOff event data', event);
+    }).on('error', console.error);
   }
 
-  borrow = async (amount) => {
-    if (typeof this.state.dbank !== 'undefined') {
-      try {
-        await this.state.dbank.methods.borrow().send({
-          value: this.state.web3.utils.toWei(amount.toPrecision()),
-          from: this.state.account
-        });
-      } catch (error) {
-        console.log('Error, borrow: ', error);
-      }
-    }
-  }
-
-  payOff = async () => {
-    if (typeof this.state.dbank !== 'undefined') {
-      try {
-        const collateralEther = await this.state.dbank.methods.collateralEther(this.state.account).call({
-          from: this.state.account
-        });
-        const tokenBorrowed = collateralEther / 2;
-        await this.state.token.methods.approve(this.state.dBankAddress, tokenBorrowed.toString()).send({
-          from: this.state.account
-        });
-        await this.state.dbank.methods.payOff().send({
-          from: this.state.account
-        });
-      } catch (error) {
-        console.log('Error, pay off: ', error);
-      }
-    }
-  }
-
-  fetchBalance = () => {
-    this.state.web3.eth.getBalance(this.state.account).then(balance => {
-      this.setState({
-        balance: this.state.web3.utils.fromWei(balance)
-      });
+  async deposit(amount) {
+    // if gas and gasPrice is insufficient, "deposit" method may be failed
+    const tx = this.dbankContract.methods.deposit();
+    const gas = await tx.estimateGas({
+      from: this.state.account,
+      value: this.web3.utils.toWei(amount, 'ether')
+    });
+    const gasPrice = await this.web3.eth.getGasPrice();
+    tx.send({
+      gas,
+      gasPrice,
+      value: this.web3.utils.toWei(amount, 'ether'),
+      from: this.state.account
+    }).on('transactionHash', (hash) => {
+      // User clicked Confirm button in MetaMask
+      console.log('hash', hash);
+      // Network operation starts here
+      this.setState({ loading: true });
+    }).on('receipt', (receipt) => {
+      console.log('receipt', receipt);
+    }).on('confirmation', (confirmationNumber, receipt) => {
+      console.log('confirmation-number', confirmationNumber);
+      console.log('confirmation-receipt', receipt);
+    }).on('error', (err) => {
+      console.error(err);
     });
   }
 
-  onChangeDepositAmount = (value) => this.setState({ depositAmount: value })
+  async withdraw() {
+    // if gas and gasPrice is insufficient, "withdraw" method may be failed
+    const tx = this.dbankContract.methods.withdraw();
+    const gas = await tx.estimateGas({
+      from: this.state.account
+    });
+    const gasPrice = await this.web3.eth.getGasPrice();
+    tx.send({
+      gas,
+      gasPrice,
+      from: this.state.account
+    }).on('transactionHash', (hash) => {
+      // User clicked Confirm button in MetaMask
+      console.log('hash', hash);
+      // Network operation starts here
+      this.setState({ loading: true });
+    }).on('receipt', (receipt) => {
+      console.log('receipt', receipt);
+    }).on('confirmation', (confirmationNumber, receipt) => {
+      console.log('confirmation-number', confirmationNumber);
+      console.log('confirmation-receipt', receipt);
+    }).on('error', (err) => {
+      console.error(err);
+    });
+  }
+
+  async borrow(amount) {
+    // if gas and gasPrice is insufficient, "borrow" method may be failed
+    const tx = this.dbankContract.methods.borrow();
+    const gas = await tx.estimateGas({
+      from: this.state.account,
+      value: this.web3.utils.toWei(amount, 'ether')
+    });
+    const gasPrice = await this.web3.eth.getGasPrice();
+    tx.send({
+      gas,
+      gasPrice,
+      value: this.web3.utils.toWei(amount, 'ether'),
+      from: this.state.account
+    }).on('transactionHash', (hash) => {
+      // User clicked Confirm button in MetaMask
+      console.log('hash', hash);
+      // Network operation starts here
+      this.setState({ loading: true });
+    }).on('receipt', (receipt) => {
+      console.log('receipt', receipt);
+    }).on('confirmation', (confirmationNumber, receipt) => {
+      console.log('confirmation-number', confirmationNumber);
+      console.log('confirmation-receipt', receipt);
+    }).on('error', (err) => {
+      console.error(err);
+    });
+  }
+
+  async payOff() {
+    // if gas and gasPrice is insufficient, "payOff" method may be failed
+    const tokenBorrowed = this.state.borrowBalance / 2;
+    const txApprove = this.tokenContract.methods.approve(this.dBankAddress, tokenBorrowed.toString());
+    let gas = await txApprove.estimateGas({
+      from: this.state.account
+    });
+    const gasPrice = await this.web3.eth.getGasPrice();
+    await txApprove.send({
+      gas,
+      gasPrice,
+      from: this.state.account
+    }).on('transactionHash', (hash) => {
+      // User clicked Confirm button in MetaMask
+      console.log('hash', hash);
+      // Network operation starts here
+      this.setState({ loading: true });
+    }).on('receipt', (receipt) => {
+      console.log('receipt', receipt);
+    }).on('confirmation', (confirmationNumber, receipt) => {
+      console.log('confirmation-number', confirmationNumber);
+      console.log('confirmation-receipt', receipt);
+    }).on('error', (err) => {
+      console.error(err);
+    });
+
+    // if gas and gasPrice is insufficient, "payOff" method may be failed
+    const txPayOff = this.dbankContract.methods.payOff();
+    gas = await txPayOff.estimateGas({
+      from: this.state.account
+    });
+    await txPayOff.send({
+      gas,
+      gasPrice,
+      from: this.state.account
+    }).on('transactionHash', (hash) => {
+      // User clicked Confirm button in MetaMask
+      console.log('hash', hash);
+      // Network operation starts here
+      this.setState({ loading: true });
+    }).on('receipt', (receipt) => {
+      console.log('receipt', receipt);
+    }).on('confirmation', (confirmationNumber, receipt) => {
+      console.log('confirmation-number', confirmationNumber);
+      console.log('confirmation-receipt', receipt);
+    }).on('error', (err) => {
+      console.error(err);
+    });
+  }
+
+  onChangeDepositAmount = (value) => this.setState({ depositAmount: value.toString() })
 
   onClickDeposit = () => {
-    this.deposit(this.state.depositAmount).then(this.fetchBalance);
+    this.deposit(this.state.depositAmount);
   }
 
   onClickWithdraw = () => {
-    this.withdraw().then(this.fetchBalance);
+    this.withdraw();
   }
 
-  onChangeBorrowAmount = (value) => this.setState({ borrowAmount: value })
+  onChangeBorrowAmount = (value) => this.setState({ borrowAmount: value.toString() })
 
   onClickBorrow = () => {
-    this.borrow(this.state.borrowAmount).then(this.fetchBalance);
+    this.borrow(this.state.borrowAmount);
   }
 
   onClickPayOff = () => {
-    this.payOff().then(this.fetchBalance);
+    this.payOff();
   }
 
   render = () => (
@@ -199,72 +426,141 @@ class App extends PureComponent {
               marginBottom: 'unset',
               marginLeft: '0.5em',
               color: 'white'
-            }}>Current Balance: {parseFloat(this.state.balance, 10).toFixed(2)} ETH</Title>
+            }}>Wallet Balance: {this.web3 && this.web3.utils.fromWei(this.state.walletBalance)} ETH</Title>
+            <Title level={5} style={{
+              flex: 1,
+              textAlign: 'right',
+              lineHeight: 'unset',
+              marginBottom: 'unset',
+              marginLeft: '0.5em',
+              color: 'white'
+            }}>Deposit Balance: {this.web3 && this.web3.utils.fromWei(this.state.depositBalance)} ETH</Title>
+            <Title level={5} style={{
+              flex: 1,
+              textAlign: 'right',
+              lineHeight: 'unset',
+              marginBottom: 'unset',
+              marginLeft: '0.5em',
+              color: 'white'
+            }}>Borrow Balance: {this.web3 && this.web3.utils.fromWei(this.state.borrowBalance)} ETH</Title>
           </div>
         </Header>
         <Content style={{
           display: 'flex',
           justifyContent: 'center'
         }}>
-          <div style={{ marginTop: 20, textAlign: 'center' }}>
-            <Title level={1}>Welcome to d₿ank</Title>
-            <Tabs defaultActiveKey="1" type="card" style={{ width: 400 }}>
-              <TabPane tab="Deposit" key="1" style={{
-                width: '100%',
-                textAlign: 'center'
-              }}>
-                <Paragraph>How much do you want to deposit?</Paragraph>
-                <Paragraph>(min. amount is 0.01 ETH)</Paragraph>
-                <Paragraph>(1 deposit is possible at the time)</Paragraph>
-                <InputNumber
-                  min={0.01}
-                  value={this.state.depositAmount}
-                  placeholder="amount..."
-                  style={{
-                    marginBottom: 30,
-                    display: 'block',
-                    width: '100%'
-                  }}
-                  onChange={this.onChangeDepositAmount}
-                />
-                <Button type="primary" onClick={this.onClickDeposit}>DEPOSIT</Button>
-              </TabPane>
-              <TabPane tab="Withdraw" key="2" style={{
-                width: '100%',
-                textAlign: 'center'
-              }}>
-                <Paragraph>Do you want to withdraw + take interest?</Paragraph>
-                <Button type="primary" onClick={this.onClickWithdraw}>WITHDRAW</Button>
-              </TabPane>
-              <TabPane tab="Borrow" key="3" style={{
-                width: '100%',
-                textAlign: 'center'
-              }}>
-                <Paragraph>Do you want to borrow token?</Paragraph>
-                <Paragraph>(You'll get 50% of collateral, in Tokens)</Paragraph>
-                <Paragraph>Type collateral amount (in ETH)</Paragraph>
-                <InputNumber
-                  min={0.01}
-                  value={this.state.borrowAmount}
-                  placeholder="amount..."
-                  style={{
-                    marginBottom: 30,
-                    display: 'block',
-                    width: '100%'
-                  }}
-                  onChange={this.onChangeBorrowAmount}
-                />
-                <Button type="primary" onClick={this.onClickBorrow}>BORROW</Button>
-              </TabPane>
-              <TabPane tab="Payoff" key="4" style={{
-                width: '100%',
-                textAlign: 'center'
-              }}>
-                <Paragraph>Do you want to payoff the loan?</Paragraph>
-                <Paragraph>(You'll receive your collateral - fee)</Paragraph>
-                <Button type="primary" onClick={this.onClickPayOff}>PAYOFF</Button>
-              </TabPane>
-            </Tabs>
+          <div style={{ marginTop: 20 }}>
+            {this.state.hasError && (
+              <Alert
+                type="warning"
+                message={this.state.errorMessage}
+                description={this.state.errorDescription}
+                closable
+                onClose={() => this.setState({ hasError: false })}
+              />
+            )}
+            <div style={{ textAlign: 'center' }}>
+              <Title level={1}>Welcome to d₿ank</Title>
+              <Tabs defaultActiveKey="1" type="card" style={{ width: '100%' }}>
+                <TabPane tab="Deposit" key="1" style={{
+                  width: '100%',
+                  textAlign: 'center'
+                }}>
+                  <Paragraph>How much do you want to deposit?</Paragraph>
+                  <Paragraph>(min. amount is 0.01 ETH)</Paragraph>
+                  <Paragraph>(1 deposit is possible at the time)</Paragraph>
+                  <InputNumber
+                    min={0.01}
+                    value={this.state.depositAmount}
+                    placeholder="amount..."
+                    style={{
+                      marginBottom: 30,
+                      display: 'block',
+                      width: '100%'
+                    }}
+                    onChange={this.onChangeDepositAmount}
+                    disabled={this.state.deposited}
+                  />
+                  <Button
+                    type="primary"
+                    style={{
+                      marginBottom: 20
+                    }}
+                    onClick={this.onClickDeposit}
+                    disabled={this.state.deposited}
+                  >DEPOSIT</Button>
+                  {this.state.deposited && (
+                    <Paragraph>Already you deposited</Paragraph>
+                  )}
+                </TabPane>
+                <TabPane tab="Withdraw" key="2" style={{
+                  width: '100%',
+                  textAlign: 'center'
+                }}>
+                  <Paragraph>Do you want to withdraw + take interest?</Paragraph>
+                  <Button
+                    type="primary"
+                    style={{
+                      marginBottom: 20
+                    }}
+                    onClick={this.onClickWithdraw}
+                    disabled={!this.state.deposited}
+                  >WITHDRAW</Button>
+                  {!this.state.deposited && (
+                    <Paragraph>Nothing deposited</Paragraph>
+                  )}
+                </TabPane>
+                <TabPane tab="Borrow" key="3" style={{
+                  width: '100%',
+                  textAlign: 'center'
+                }}>
+                  <Paragraph>Do you want to borrow token?</Paragraph>
+                  <Paragraph>(You'll get 50% of collateral, in Tokens)</Paragraph>
+                  <Paragraph>Type collateral amount (in ETH)</Paragraph>
+                  <InputNumber
+                    min={0.01}
+                    value={this.state.borrowAmount}
+                    placeholder="amount..."
+                    style={{
+                      marginBottom: 30,
+                      display: 'block',
+                      width: '100%'
+                    }}
+                    onChange={this.onChangeBorrowAmount}
+                    disabled={this.state.borrowed}
+                  />
+                  <Button
+                    type="primary"
+                    style={{
+                      marginBottom: 20
+                    }}
+                    onClick={this.onClickBorrow}
+                    disabled={this.state.borrowed}
+                  >BORROW</Button>
+                  {this.state.borrowed && (
+                    <Paragraph>Already you borrowed</Paragraph>
+                  )}
+                </TabPane>
+                <TabPane tab="Payoff" key="4" style={{
+                  width: '100%',
+                  textAlign: 'center'
+                }}>
+                  <Paragraph>Do you want to payoff the loan?</Paragraph>
+                  <Paragraph>(You'll receive your collateral - fee)</Paragraph>
+                  <Button
+                    type="primary"
+                    style={{
+                      marginBottom: 20
+                    }}
+                    onClick={this.onClickPayOff}
+                    disabled={!this.state.borrowed}
+                  >PAYOFF</Button>
+                  {!this.state.borrowed && (
+                    <Paragraph>Nothing borrowed</Paragraph>
+                  )}
+                </TabPane>
+              </Tabs>
+            </div>
           </div>
         </Content>
       </Layout>
